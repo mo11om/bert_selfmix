@@ -102,7 +102,7 @@ class SelfMixData:
             all_loader = DataLoader(
                 dataset=all_dataset, 
                 batch_size=self.data_args.batch_size,
-                shuffle=True,
+                shuffle=False,
                 num_workers=8)          
             return all_loader
 
@@ -116,7 +116,7 @@ class SelfMixData:
             labeled_trainloader = DataLoader(
                 dataset=labeled_dataset, 
                 batch_size=self.data_args.batch_size_mix,
-                shuffle=True,
+                shuffle=False,
                 num_workers=8)   
             
             unlabeled_dataset = SelfMixDataset(
@@ -128,6 +128,6 @@ class SelfMixData:
             unlabeled_trainloader = DataLoader(
                 dataset=unlabeled_dataset, 
                 batch_size=self.data_args.batch_size_mix,
-                shuffle=True,
+                shuffle=False,
                 num_workers=8)     
             return labeled_trainloader, unlabeled_trainloader

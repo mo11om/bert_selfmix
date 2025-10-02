@@ -243,41 +243,221 @@ class SelfMixTrainer:
         logger.info("Loss_Mix: {:.4f}, Loss_P: {:.4f}, Loss_R: {:.4f}, Loss: {:.4f} "
                     .format(loss_mix, pse_loss, kl_loss, loss))
 
+    # def _eval_samples(self, eval_loader):
+    #     """
+    #     Sample selection
+    #     """
+    #     self.model.eval()
+    #     loss_func = nn.CrossEntropyLoss(reduction='none')
+    #     losses = np.zeros(len(eval_loader.dataset))
+    #     with torch.no_grad():
+    #         for i, data in enumerate(eval_loader):
+    #             input_ids, att_mask, labels, index = [Variable(elem.cuda()) for elem in data] 
+    #             outputs = self.model(input_ids, att_mask) 
+    #             pred = torch.softmax(outputs, dim=-1)
+    #             loss = loss_func(pred, labels).cpu().detach().numpy()
+    #             index = index.long().cpu().detach().numpy()
+    #             losses[index] = loss
+                
+    #     if self.model_args.class_reg:
+    #         labels = np.array(eval_loader.dataset.labels, dtype=int)
+    #         for now_class in range(self.model_args.num_classes):
+    #             indices = np.where(labels == now_class)[0]
+    #             losses[indices] = (losses[indices] - losses[indices].mean()) / losses[indices].var()
+    #     else:
+    #         losses = (losses - losses.min()) / (losses.max() - losses.min())
+        
+    #     gmm = GaussianMixture(
+    #         n_components=2, 
+    #         max_iter=self.model_args.gmm_max_iter, 
+    #         tol=self.model_args.gmm_tol, 
+    #         reg_covar=self.model_args.gmm_reg_covar
+    #     )
+    #     losses = losses.reshape(-1, 1)
+    #     gmm.fit(losses)
+    #     prob = gmm.predict_proba(losses) 
+    #     prob = prob[:,gmm.means_.argmin()]
+    #     return prob
+    
+    
     def _eval_samples(self, eval_loader):
         """
-        Sample selection
+        Calculates per-sample loss, fits GMM, and returns clean probabilities.
+        Includes robust filtering for NaN/Inf values before GMM fitting.
         """
         self.model.eval()
         loss_func = nn.CrossEntropyLoss(reduction='none')
         losses = np.zeros(len(eval_loader.dataset))
+        
         with torch.no_grad():
             for i, data in enumerate(eval_loader):
+                # Ensure data is handled correctly (using Variable only where necessary)
                 input_ids, att_mask, labels, index = [Variable(elem.cuda()) for elem in data] 
                 outputs = self.model(input_ids, att_mask) 
-                pred = torch.softmax(outputs, dim=-1)
-                loss = loss_func(pred, labels).cpu().detach().numpy()
-                index = index.long().cpu().detach().numpy()
-                losses[index] = loss
                 
-        if self.model_args.class_reg:
-            labels = np.array(eval_loader.dataset.labels, dtype=int)
-            for now_class in range(self.model_args.num_classes):
-                indices = np.where(labels == now_class)[0]
-                losses[indices] = (losses[indices] - losses[indices].mean()) / losses[indices].var()
-        else:
-            losses = (losses - losses.min()) / (losses.max() - losses.min())
+                # Use softmax outputs for loss calculation to match original code structure
+                pred = torch.softmax(outputs, dim=-1) 
+                
+                # Compute loss and store in the losses array at the correct index
+                loss = loss_func(pred, labels).cpu().detach().numpy()
+                index_np = index.long().cpu().detach().numpy()
+                losses[index_np] = loss
+                
+        # --- NaN/Inf Handling and Normalization ---
         
+        # 1. Identify which losses are finite (not NaN or Inf)
+        finite_mask = np.isfinite(losses)
+        finite_indices = np.where(finite_mask)[0]
+        finite_losses = losses[finite_indices]
+        
+        # Initialize final probability array (defaulting to 0 for non-finite samples)
+        original_prob = np.zeros(len(eval_loader.dataset))
+        
+        if finite_losses.size < 2: # GMM requires at least 2 samples
+            logger.error(f"Only {finite_losses.size} finite loss values remain. Cannot reliably fit GMM.")
+            # Returns 0 probability for all samples if GMM fitting is impossible
+            return original_prob 
+            
+        
+        # 2. Perform Normalization on only the FINITE losses
+        normalized_finite_losses = np.copy(finite_losses) # Operate on a copy
+        
+        if self.model_args.class_reg:
+            labels_array = np.array(eval_loader.dataset.labels, dtype=int)
+            finite_labels = labels_array[finite_indices]
+            
+            for now_class in range(self.model_args.num_classes):
+                class_mask = (finite_labels == now_class)
+                class_losses = finite_losses[class_mask]
+                
+                if class_losses.size > 0:
+                    mean = class_losses.mean()
+                    var = class_losses.var()
+                    
+                    # Handle near-zero variance
+                    if var < 1e-6:
+                        normalized_finite_losses[class_mask] = (class_losses - mean)
+                    else:
+                        normalized_finite_losses[class_mask] = (class_losses - mean) / var
+        else:
+            # Global normalization
+            losses_min, losses_max = finite_losses.min(), finite_losses.max()
+            if losses_max - losses_min < 1e-6:
+                normalized_finite_losses = (finite_losses - losses_min)
+            else:
+                normalized_finite_losses = (finite_losses - losses_min) / (losses_max - losses_min)
+                
+        
+        # 3. Fit GMM on FINITE and NORMALIZED losses
         gmm = GaussianMixture(
             n_components=2, 
             max_iter=self.model_args.gmm_max_iter, 
             tol=self.model_args.gmm_tol, 
             reg_covar=self.model_args.gmm_reg_covar
         )
+        
+        # Reshape for GMM fitting
+        normalized_finite_losses = normalized_finite_losses.reshape(-1, 1)
+        gmm.fit(normalized_finite_losses)
+        
+        # 4. Get clean probabilities for FINITE SAMPLES ONLY
+        probabilities_matrix = gmm.predict_proba(normalized_finite_losses) 
+        index_of_clean_component = gmm.means_.argmin()
+        finite_prob = probabilities_matrix[:, index_of_clean_component]
+        
+        # 5. Map probabilities back to the original dataset size
+        original_prob[finite_indices] = finite_prob
+        
+        if not np.all(finite_mask):
+             non_finite_count = np.sum(~finite_mask)
+             logger.warning(f"Note: {non_finite_count} samples had non-finite loss and were assigned probability 0 for splitting.")
+        
+        return original_prob
+
+    def get_labeled_unlabeled_loaders(self):
+        """
+        Implements the dynamic data splitting process (SelfMix) to separate the 
+        training data into labeled (clean) and unlabeled (noisy) subsets 
+        based on the current model's loss and GMM fitting.
+
+        Returns:
+            labeled_trainloader (DataLoader): Loader for the clean/labeled subset.
+            unlabeled_trainloader (DataLoader): Loader for the noisy/unlabeled subset.
+        """
+        logger.info("***** Starting Dynamic Data Split for Mixup *****")
+        
+        # 1. INITIAL SETUP and DATA LOADING
+        self.model.eval()
+        train_loader = self.train_data.run("all")
+        loss_func = nn.CrossEntropyLoss(reduction='none')
+        
+        total_samples = len(train_loader.dataset)
+        losses = np.zeros(total_samples)
+        
+        # 2. CALCULATE PER-SAMPLE LOSS
+        with torch.no_grad():
+            for i, data in enumerate(train_loader):
+                # Ensure data is handled correctly (using Variable only where necessary,
+                # but matching the provided trainer.py style for consistency)
+                # The _eval_samples uses Variable, so we match it here.
+                input_ids, att_mask, labels, index = [Variable(elem.cuda()) for elem in data] 
+                
+                # Note: The original _eval_samples passes outputs (logits) to loss_func, 
+                # but then uses softmax(outputs) inside the loss_func call (loss_func(pred, labels)).
+                # To be precise to the original code's logic which is loss_func(pred, labels), 
+                # where pred=softmax(outputs), we will stick to the logic for now.
+                # However, typically CrossEntropyLoss expects logits. 
+                # Sticking to the logic of the provided _eval_samples for minimal change.
+                outputs = self.model(input_ids, att_mask) 
+                pred = torch.softmax(outputs, dim=-1)
+                
+                loss = loss_func(pred, labels).cpu().detach().numpy()
+                index = index.long().cpu().detach().numpy()
+                losses[index] = loss
+
+        # 3. OPTIONAL: CLASS-WISE REGULARIZATION AND NORMALIZATION
+        if self.model_args.class_reg:
+            labels_array = np.array(train_loader.dataset.labels, dtype=int)
+            for now_class in range(self.model_args.num_classes):
+                indices = np.where(labels_array == now_class)[0]
+                # Avoid division by zero/near-zero variance
+                var = losses[indices].var()
+                if var < 1e-6:
+                    losses[indices] = (losses[indices] - losses[indices].mean())
+                else:
+                    losses[indices] = (losses[indices] - losses[indices].mean()) / var
+        else:
+            # Global min-max scaling
+            losses_min, losses_max = losses.min(), losses.max()
+            if losses_max - losses_min < 1e-6:
+                # Avoid division by zero
+                losses = losses - losses_min
+            else:
+                losses = (losses - losses_min) / (losses_max - losses_min)
+        
+        # 4. FIT GAUSSIAN MIXTURE MODEL (GMM)
         losses = losses.reshape(-1, 1)
+        gmm = GaussianMixture(
+            n_components=2, 
+            max_iter=self.model_args.gmm_max_iter, 
+            tol=self.model_args.gmm_tol, 
+            reg_covar=self.model_args.gmm_reg_covar
+        )
         gmm.fit(losses)
-        prob = gmm.predict_proba(losses) 
-        prob = prob[:,gmm.means_.argmin()]
-        return prob
-    
+        
+        # 5. DETERMINE CLEAN PROBABILITY ('prob')
+        probabilities_matrix = gmm.predict_proba(losses) 
+        # Select the probability of belonging to the clean (low-loss) component
+        index_of_clean_component = gmm.means_.argmin()
+        prob = probabilities_matrix[:, index_of_clean_component]
+
+        # 6. THRESHOLD AND CREATE SPLIT MASK ('pred')
+        pred = (prob > self.model_args.p_threshold)
+
+        # 7. CREATE LABELED AND UNLABELED DATALOADERS
+        labeled_trainloader, unlabeled_trainloader = self.train_data.run("train", pred=pred, prob=prob)
+        
+        logger.info(f"Split results: Labeled (Clean) samples: {pred.sum()}, Unlabeled (Noisy) samples: {total_samples - pred.sum()}")
+        return labeled_trainloader, unlabeled_trainloader
     def save_model(self):
         self.model.save_model(self.training_args.model_save_path)
