@@ -13,11 +13,20 @@ class Bert4Classify(nn.Module):
         
         # d_model = 768 if 'bert' in pretrained_model_name_or_path else 1024
         d_model = 768 if ('bert' in pretrained_model_name_or_path or 'BERT' in pretrained_model_name_or_path) else 1024
-        self.mlp = nn.Sequential(
-            nn.Linear(d_model, d_model),
-            nn.Tanh(),
+        
+        ##original
+        # self.mlp = nn.Sequential(
+        #     nn.Linear(d_model, d_model),
+        #     nn.Tanh(),
+        #     nn.Dropout(dropout_rate),
+        #     nn.Linear(d_model, num_classes)
+        # )
+        self.mlp=nn.Sequential(
+            nn.Linear(d_model, d_model // 2),
+            nn.LayerNorm(d_model // 2), 
+            nn.GELU(),
             nn.Dropout(dropout_rate),
-            nn.Linear(d_model, num_classes)
+            nn.Linear(d_model // 2, num_classes)
         )
 
     def forward(self, input_ids, att_mask):
