@@ -12,8 +12,162 @@ import torch.nn.functional as F
 logger = logging.getLogger(__name__)
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 warnings.filterwarnings('ignore')
+ 
+def compute_loss(outputs, targets, values,tag_loss_fn):
+    losses = {}
+    tag_hits_k = {}
+  
+    losses["tag"] = tag_loss_fn(outputs["tag"], targets["tag"])
+
+     
+        # if "scale" in outputs:
+        #     scale_pred_class = outputs["scale"].argmax(dim=-1)  # [batch_size]
+        # else:
+        #     scale_pred_class = torch.ones_like(values, dtype=torch.long)  # [batch_size]
+
+        # # scale → 數值
+        # id2scale_tensor = torch.tensor([float(id2scale[idx]) for idx in range(len(id2scale))], dtype=torch.float, device=values.device)
+        # scale_pred_values = id2scale_tensor[scale_pred_class] # [batch_size]
+        
+        # # 計算 fact_pred
+        # fact_pred = values * (-1) ** negative_pred * (10 ** scale_pred_values)
+        # fact_target = targets["fact"].view(-1).float()
+        
+        # # 計算 fact loss
+        # losses["fact"] = fact_loss_fn(fact_pred, fact_target)
 
 
+    # # 確保權重總和為 1
+    # total_weight = sum(task_weights.values())
+    # normalized_weights = {k: v / total_weight for k, v in task_weights.items()}
+    
+    # 使用歸一化後的權重計算損失
+    # total_loss = sum(task_weights.get(k, 1.0) * v for k, v in losses.items())
+    
+    # 原本的 total loss 計算
+    total_loss = sum(task_weights[k] * losses[k] for k in losses.keys())
+    
+    # 平衡 loss 避免變大
+    total_loss = total_loss / sum(task_weights.values())
+
+    
+    # print('total_loss', total_loss)
+    return total_loss, losses 
+
+class CB_CE_Loss(nn.Module):
+    '''
+    https://ieeexplore.ieee.org/abstract/document/8953804
+    '''
+    def __init__(self, num_samples, beta=0.99):
+        """
+        Args:
+            num_samples: list or tensor, 每個類別的樣本數
+            beta: 控制 class-balanced 權重的超參數 (通常取 0.99)
+        """
+        super(CB_CE_Loss, self).__init__()
+        
+        # 計算 Class-Balanced 權重
+        effective_num = 1.0 - torch.pow(torch.tensor(beta), torch.tensor(num_samples))
+        weights = (1.0 - beta) / (effective_num + 1e-8)
+        # self.weights = weights / torch.sum(weights)  # normalize
+        self.weights = weights
+        # self.ignore_index = ignore_index
+        
+    def tag_counter_init(file_path='processed_data_task1/counter/tag_count_train_data.json'):
+        import json
+        with open(file_path, 'r', encoding = 'utf-8') as file:
+        # with open('processed_data_task1_smaller/counter/tag_count_train_400k.json', 'r', encoding = 'utf-8') as file:
+        # with open('processed_iterable_dataset/counter/train_8k.json', 'r', encoding = 'utf-8') as file:
+            tag_counter = json.load(file)
+            
+        # 想讓數量多的類別在前面
+
+        tag_counter = dict(sorted(tag_counter.items(), key = lambda item:item[1], reverse=True))
+
+        count_threshold = 10
+        standard_rare_tags = {tag for tag, count in tag_counter.items() if count < count_threshold}
+        tag_list = [tag for tag in tag_counter.keys() if tag not in standard_rare_tags]
+        print(tag_list[:5])
+        print(f'Length of standard_rare_tags: {len(standard_rare_tags)}')
+        print(f'Length of all tags: {len(tag_list)}')
+        return tag_counter
+
+    def forward(self, logits, targets):
+        """
+        Args:
+            logits: (batch_size, num_classes) 模型輸出的 logits
+            targets: (batch_size,) 類別索引標籤
+        Returns:
+            CB-CE Loss 值
+        """
+        
+        # if targets.dim() > 1:
+        #     targets = targets.argmax(dim=-1)
+            
+        # valid_mask = (targets != self.ignore_index)  # 只對有效的 targets 計算 loss
+        # targets = targets[valid_mask]
+        # logits = logits[valid_mask]
+        
+        # 計算標準 CE Loss
+        ce_loss = F.cross_entropy(logits, targets, reduction='none')#, ignore_index=self.ignore_index)
+        
+        # 依照類別權重調整 loss
+        class_weights = self.weights.to(logits.device)
+        weighted_loss = ce_loss * class_weights[targets]
+        
+        # weighted_loss = ce_loss * class_weights[targets] * weight_mask.float()
+        return torch.mean(weighted_loss)
+
+        # return weighted_loss.sum() / weight_mask.sum()  # 只對有效樣本取平均
+def get_class_counts(train_dataset, num_classes):
+    """
+    Calculates the number of samples for each class in a DataLoader.
+
+    Args:
+        data_loader (torch.utils.data.DataLoader): The DataLoader for the dataset.
+        num_classes (int): The total number of classes.
+
+    Returns:
+        list: A list where the index corresponds to the class and the value is the sample count.
+    """
+    from collections import Counter
+    # Initialize a tensor to store counts for each class, all set to zero.
+    # counts = torch.zeros(num_classes, dtype=torch.int64)
+    
+    # # Switch to evaluation mode to disable things like dropout
+    # # (though not strictly necessary for just counting)
+    # # model.eval() 
+    
+    # # No need to track gradients for this process
+    # with torch.no_grad():
+    #     # Iterate over the entire dataset
+    #     for batch in data_loader:
+    #         # For each batch, count the occurrences of each class label
+    #         # minlength ensures the output tensor has size num_classes,
+    #         # even if a batch doesn't contain all classes.
+    #         for i, item in enumerate(batch):
+    #             # item is usually a torch.Tensor
+    #             print(f"  - Item {i}, Shape: {item.shape}, Dtype: {item.dtype}")
+    #         labels = batch[-1]
+    #         batch_counts = torch.bincount(labels, minlength=num_classes)
+            
+    #         # Add the counts from this batch to the total counts
+    #         counts += batch_counts.cpu() # Move to CPU to be safe
+            
+    # return counts.tolist()
+    all_labels = train_dataset.labels
+
+    # 3. Count the occurrences of each label
+    # This gives a dictionary like {class_0: count, class_1: count, ...}
+    label_counts = Counter(all_labels)
+
+    # 4. Create the ordered list of counts required by the loss function
+    # This ensures the list index corresponds to the class index
+    class_counts = [label_counts[i] for i in range(num_classes)]
+
+    # print(f"Dataset loaded. Number of classes: {num_classes}")
+    # print(f"Class counts: {class_counts}")
+    return class_counts
 def metric(y_true, y_pred):
     accuracy = accuracy_score(y_true, y_pred)
     macro_precision = precision_score(y_true, y_pred, average='macro')
@@ -53,7 +207,12 @@ class SelfMixTrainer:
         self.training_args = training_args
         if self.training_args is not None:
             self.optimizer = Adam(self.model.parameters(), lr=training_args.lr)
-    
+        
+        # train_tag_counts = get_value_counts(train_loader, "tag")
+        # num_tag_samples = [train_tag_counts.get(tag, 0) for tag in sorted(train_tag_counts.keys())]  # 確保對應到索引順序
+        num_class_list=get_class_counts(self.train_data.datasets,self.model_args.num_classes)
+        self.loss_fn = CB_CE_Loss(num_class_list, beta = 0.99)
+
     def warmup(self):
         logger.info("***** Warmup stage *****")
         
@@ -69,7 +228,7 @@ class SelfMixTrainer:
         else:
             warmup_samples, warmup_epochs = 0, 0
             
-        loss_func = nn.CrossEntropyLoss()
+        loss_func = self.loss_fn# nn.CrossEntropyLoss()
         now_samples = 0
         
         patience_counter = 0
