@@ -45,8 +45,9 @@ def compute_kl_loss(p, q, pad_mask=None):
 
 
 class SelfMixTrainer:
-    def __init__(self, model, train_data=None, eval_data=None, model_args=None, training_args=None):
-        self.model = model.cuda()
+    def __init__(self, model, train_data=None, eval_data=None, model_args=None, training_args=None, device='cuda'):
+        self.device = device
+        self.model = model.to(self.device)
         self.train_data = train_data
         self.eval_data = eval_data
         self.model_args = model_args
@@ -82,8 +83,8 @@ class SelfMixTrainer:
             train_loss, train_acc = 0., 0.
             for i, data in enumerate(train_loader): 
                 # print (data) 
-                # input_ids, att_mask, labels, _  = [Variable(elem.cuda()) for elem in data]
-                input_ids, att_mask, labels, _ = [elem.cuda() for elem in data]
+                # input_ids, att_mask, labels, _  = [Variable(elem.to(self.device)) for elem in data]
+                input_ids, att_mask, labels, _ = [elem.to(self.device) for elem in data]
                 logits = self.model(input_ids, att_mask)
                 loss = loss_func(logits, labels)
                 train_loss += loss.item()
@@ -138,7 +139,7 @@ class SelfMixTrainer:
         self.model.eval()
         y_true, y_pred = np.zeros(len(eval_loader.dataset), dtype=int), np.zeros(len(eval_loader.dataset), dtype=int)
         for j, data in enumerate(eval_loader):
-            val_input_ids, val_att, val_labels, index = [Variable(elem.cuda()) for elem in data]
+            val_input_ids, val_att, val_labels, index = [Variable(elem.to(self.device)) for elem in data]
             with torch.no_grad():
                 index = index.long().cpu().detach().numpy()
                 pred = self.model(val_input_ids, val_att).argmax(dim=-1).cpu().detach().numpy()
@@ -195,8 +196,8 @@ class SelfMixTrainer:
 
             
             targets_x = F.one_hot(targets_x, num_classes=self.model_args.num_classes)
-            inputs_x, inputs_x_att, targets_x = inputs_x.cuda(), inputs_x_att.cuda(), targets_x.cuda(non_blocking=True)
-            inputs_u, att_u = inputs_u.cuda(), att_u.cuda()
+            inputs_x, inputs_x_att, targets_x = inputs_x.to(self.device), inputs_x_att.to(self.device), targets_x.to(self.device, non_blocking=True)
+            inputs_u, att_u = inputs_u.to(self.device), att_u.to(self.device)
                         
             self.model.eval()
             with torch.no_grad():
@@ -252,7 +253,7 @@ class SelfMixTrainer:
         losses = np.zeros(len(eval_loader.dataset))
         with torch.no_grad():
             for i, data in enumerate(eval_loader):
-                input_ids, att_mask, labels, index = [Variable(elem.cuda()) for elem in data] 
+                input_ids, att_mask, labels, index = [Variable(elem.to(self.device)) for elem in data]
                 outputs = self.model(input_ids, att_mask) 
                 pred = torch.softmax(outputs, dim=-1)
                 loss = loss_func(pred, labels).cpu().detach().numpy()

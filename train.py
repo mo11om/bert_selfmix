@@ -167,6 +167,10 @@ class OurTrainingArguments:
         default=None,
         metadata={"help": "The path to save model"}
     )
+    device: Optional[str] = field(
+        default='cuda' if torch.cuda.is_available() else 'cpu',
+        metadata={"help": "Device to run the training on (e.g., 'cuda', 'cpu')"}
+    )
 
     
 def main():
@@ -217,7 +221,8 @@ def main():
         train_data=selfmix_train_data,
         eval_data=selfmix_eval_data,
         model_args=model_args,
-        training_args=training_args
+        training_args=training_args,
+        device=training_args.device
     )
     
     # train and eval

@@ -194,3 +194,4 @@ pyrightconfig.json
 *.jsonl
 *.pt
 lightning_logs/
+models/
